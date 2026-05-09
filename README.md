@@ -75,21 +75,32 @@ Notes:
 ### Install
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+python -m venv venv
+venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 ### Run the app
 
 ```powershell
-streamlit run streamlit_agents/chat_multi_agent.py
+python -m streamlit run streamlit_agents/chat_multi_agent.py
 ```
 
 The app starts a local MCP server process internally with:
 
 ```powershell
 mcp run servers/server_agente_atendente.py
+```
+
+Notes:
+
+- You do not need to start MCP manually for the Streamlit flow.
+- The app resolves the MCP CLI from the active virtual environment automatically.
+
+If the MCP CLI reports `Error: typer is required`, reinstall dependencies:
+
+```powershell
+pip install -r requirements.txt
 ```
 
 ## Current Demo Boundaries
@@ -109,6 +120,13 @@ Recommended local check:
 
 ```powershell
 python -m compileall servers streamlit_agents
+```
+
+Optional smoke checks:
+
+```powershell
+streamlit --version
+mcp version
 ```
 
 ## Portfolio Positioning

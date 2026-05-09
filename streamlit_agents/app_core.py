@@ -1,7 +1,11 @@
 import asyncio
 import json
 import os
+import shutil
 import sys
+import threading
+from pathlib import Path
+from typing import Any, Coroutine
 
 from agents import Agent, ModelSettings, Runner
 from agents.mcp import MCPServerStdio
@@ -13,12 +17,27 @@ APP_TITLE = "NovoDrive Motors"
 APP_CAPTION = "NovaDrive Motors"
 APP_IMAGE_PATH = "arquivos/novadrive.png"
 CHAT_PLACEHOLDER = "Digite sua pergunta:"
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4-1106-preview")
+MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 MCP_SERVER_SCRIPT = "servers/server_agente_atendente.py"
 
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+
+def resolve_mcp_command() -> str:
+    mcp_from_path = shutil.which("mcp")
+    if mcp_from_path:
+        return mcp_from_path
+
+    scripts_dir = Path(sys.executable).resolve().parent
+    candidates = ["mcp.exe", "mcp.cmd", "mcp"] if sys.platform == "win32" else ["mcp"]
+    for candidate in candidates:
+        command_path = scripts_dir / candidate
+        if command_path.exists():
+            return str(command_path)
+
+    return "mcp"
 
 
 def render_header() -> None:
@@ -63,11 +82,12 @@ def render_history() -> None:
 
 
 def build_agent(name: str, handoff_description: str, instructions: str, handoffs: list[Agent] | None = None) -> Agent:
+    resolved_handoffs = handoffs or []
     return Agent(
         name=name,
         model=MODEL_NAME,
         handoff_description=handoff_description,
-        handoffs=handoffs,
+        handoffs=resolved_handoffs,
         instructions=instructions,
         model_settings=ModelSettings(tool_choice="auto", temperature=0, parallel_tool_calls=False),
     )
@@ -121,19 +141,47 @@ def initialize_agents() -> None:
     st.session_state.current_agent = reception_agent
 
 
-async def resolve_chat() -> None:
-    async with MCPServerStdio(params={"command": "mcp", "args": ["run", MCP_SERVER_SCRIPT]}) as server:
-        st.session_state.agentVendas.mcp_servers = [server]
-        st.session_state.agenteManutencao.mcp_servers = [server]
+async def resolve_chat(
+    current_agent: Agent,
+    history: list[dict[str, Any]],
+    sales_agent: Agent,
+    maintenance_agent: Agent,
+) -> tuple[Agent, list[dict[str, Any]]]:
+    async with MCPServerStdio(params={"command": resolve_mcp_command(), "args": ["run", MCP_SERVER_SCRIPT]}) as server:
+        sales_agent.mcp_servers = [server]
+        maintenance_agent.mcp_servers = [server]
 
         result = await Runner.run(
-            starting_agent=st.session_state.current_agent,
-            input=st.session_state.history,
-            context=st.session_state.history,
+            starting_agent=current_agent,
+            input=history,
+            context=history,
         )
 
-        st.session_state.current_agent = result.last_agent
-        st.session_state.history = result.to_input_list()
+        return result.last_agent, result.to_input_list()
+
+
+def run_async_task(coro: Coroutine[Any, Any, tuple[Agent, list[dict[str, Any]]]]) -> tuple[Agent, list[dict[str, Any]]]:
+    error: list[BaseException] = []
+    output: list[tuple[Agent, list[dict[str, Any]]]] = []
+
+    def _runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            output.append(loop.run_until_complete(coro))
+        except BaseException as exc:  # pragma: no cover
+            error.append(exc)
+        finally:
+            loop.close()
+
+    worker = threading.Thread(target=_runner, daemon=False)
+    worker.start()
+    worker.join()
+
+    if error:
+        raise error[0]
+
+    return output[0]
 
 
 def handle_prompt() -> None:
@@ -147,7 +195,17 @@ def handle_prompt() -> None:
         st.markdown(prompt)
 
     with st.spinner("Pensando..."):
-        asyncio.run(resolve_chat())
+        current_agent = st.session_state.current_agent
+        history = st.session_state.history
+        sales_agent = st.session_state.agentVendas
+        maintenance_agent = st.session_state.agenteManutencao
+
+        last_agent, new_history = run_async_task(
+            resolve_chat(current_agent, history, sales_agent, maintenance_agent)
+        )
+
+        st.session_state.current_agent = last_agent
+        st.session_state.history = new_history
         st.rerun()
 
 
